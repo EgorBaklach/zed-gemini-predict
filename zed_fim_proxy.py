@@ -42,15 +42,17 @@ _tls_conn = None
 _OPEN_SEMANTIC_SLOT_RE = re.compile(
     r"^("
     r"\s*|"  # 1. Blank / whitespace-only line
-    r"\s*[\{\}\(\)\[\];,]+\s*|"  # 2. Only bare punctuation/braces on the line
+    r"\s*[\{\}\(\)\[\];,\'\"]+\s*|"  # 2. Only bare punctuation, braces, or a bare opening quote (' or ") on the line
     r"\s*\}?\s*(?:if|elseif|else|while|for|foreach|switch|match)\s*\(?\s*\)?\s*\{?\s*|"  # 3. Bare control keyword (including `} elseif (`) without condition
     r".*(?:=|\?\?=|\.=|return)\s*(?:match|switch|fn|function)\s*\(?\s*\)?\s*\{?\s*|"  # 4. Bare `$v = match (` / `return match (` without subject
     r"\s*(?:return|echo|print|throw|throw\s+new|yield|goto|new|clone)\s*|"  # 5. Bare statement/instantiation keyword without expression
     r"\s*(?:(?:public|protected|private|final|abstract|static|readonly)\s+)*(?:function|class|interface|trait|enum)\s*|"  # 6. Bare declaration keyword without identifier
-    r"\s*\$[^\n=]+?(?<![=!<>])\s*(?:=|\.=|\?\?=|\+=|-=)\s*(?:new\s*)?|"  # 7. Any `$var = `, `$this->prop = `, `$arr['k'] ??= `, `$x = new ` with nothing on RHS
-    r".*(?:->|\?->|::)\s*|"  # 8. Any line ending with bare `->`, `?->`, or `::` (waiting for LSP member completion)
-    r"\s*(?://|#|\*).*|"  # 9. Inside a single-line or docblock comment line
-    r"\s*[а-яА-ЯёЁ]+\s*\(?\s*\)?\s*"  # 10. Accidental Cyrillic keyboard layout typo (e.g. `ш`, `ша()`)
+    r"\s*\$[a-zA-Z0-9_]*\s*|"  # 7. Bare `$` or `$varName` on a line before any operator (`=`, `->`, etc.) is typed
+    r"\s*\$[^\n=]+?(?<![=!<>])\s*(?:=|\.=|\?\?=|\+=|-=)\s*(?:new\s*)?[\[\(\'\"]?\s*|"  # 8. Any `$var = `, `$var = [`, `$var = '`, `$this->prop = ` with nothing inside yet
+    r".*(?:->|\?->|::)\s*|"  # 9. Any line ending with bare `->`, `?->`, or `::` (waiting for LSP member completion)
+    r"\s*(?://|#|\*).*|"  # 10. Inside a single-line or docblock comment line
+    r"\s*[a-zA-Z_][a-zA-Z0-9_]*|"  # 11. Bare partial word/keyword (`fo`, `for`, `try` without `{` or trailing space) on a line
+    r"\s*[а-яА-ЯёЁ]+\s*\(?\s*\)?\s*"  # 12. Accidental Cyrillic keyboard layout typo (e.g. `ш`, `ша()`)
     r")$"
 )
 
@@ -58,10 +60,28 @@ _OPEN_SEMANTIC_SLOT_RE = re.compile(
 def should_skip_request(prefix: str, suffix: str) -> bool:
     """
     Returns True if the cursor is at an Open Semantic Slot on the current line,
+    or at the end of an already-closed statement/block header,
     avoiding any LLM call (0ms, 0 tokens, zero architectural hallucination).
     """
     current_line = prefix.rsplit("\n", 1)[-1]
     if _OPEN_SEMANTIC_SLOT_RE.match(current_line):
+        return True
+    current_stripped = current_line.strip()
+    # Skip if the current line is already a completed statement ending with `;`
+    if current_stripped.endswith(";"):
+        return True
+    # Skip if the current line is already a completed block header ending with `{` (except `try {` when catch is missing)
+    if current_stripped.endswith("{") and not current_stripped.startswith("try"):
+        return True
+    # Skip if a closure on the current line was just closed with `}` before `);` in suffix and parens are already balanced
+    suffix_same_line = suffix.split("\n", 1)[0].strip()
+    if current_stripped.endswith("}") and suffix_same_line.endswith(";"):
+        total_open = current_line.count("(") + suffix_same_line.count("(")
+        total_close = current_line.count(")") + suffix_same_line.count(")")
+        if total_open == total_close:
+            return True
+    # Skip if the cursor is right in the middle of an identifier/keyword token (e.g. `t|ry`, `f|or`, `$v|ar`)
+    if prefix and suffix and (prefix[-1].isalnum() or prefix[-1] in ("_", "$")) and (suffix[0].isalnum() or suffix[0] == "_"):
         return True
     return False
 
@@ -171,12 +191,17 @@ def fix_paren_and_semicolon_balance(text: str, prefix: str, suffix: str) -> str:
     ):
         text = ") {"
 
-    if not suffix_same_line:
-        open_parens = current_line_prefix.count("(") - current_line_prefix.count(")")
-        added_open = text.count("(")
-        added_close = text.count(")")
-        needed_close = max(0, open_parens + added_open)
+    open_parens = current_line_prefix.count("(") - current_line_prefix.count(")")
+    suffix_net_close = max(0, suffix_same_line.count(")") - suffix_same_line.count("("))
+    added_open = text.count("(")
+    added_close = text.count(")")
+    needed_close = max(0, open_parens + added_open - suffix_net_close)
 
+    if suffix_same_line:
+        while added_close > needed_close and text.endswith(")"):
+            text = text[:-1]
+            added_close -= 1
+    else:
         while added_close > needed_close and (text.endswith("))") or text.endswith("));")):
             if text.endswith("));"):
                 text = text[:-2] + ";"
@@ -203,7 +228,7 @@ def clean_completion(text: str, prefix: str, suffix: str) -> str:
     if text.startswith("<fim_middle>"):
         text = text[len("<fim_middle>"):]
 
-    for tag in ("<|fim_suffix|>", "<|fim_prefix|>", "<|fim_middle|>", "<|endoftext|>"):
+    for tag in ("<|fim_suffix|>", "<|fim_prefix|>", "<|fim_middle|>", "<|endoftext|>", "<?php", "?>"):
         if tag in text:
             text = text.split(tag, 1)[0]
 
@@ -231,6 +256,10 @@ def clean_completion(text: str, prefix: str, suffix: str) -> str:
     if last_line_prefix and last_line_prefix.isspace() and text.startswith(last_line_prefix):
         text = text[len(last_line_prefix):]
 
+    # Prevent duplicate quote when prefix ends with ' or " and completion starts with ' or "
+    if prefix.endswith(("'", '"')) and len(text) >= 2 and text[0] == prefix[-1] and text[1].isalnum():
+        text = text[1:]
+
     # Never allow a condition/header line (`if (...)`) to also invent the body on the next line!
     current_line_stripped = prefix.rsplit("\n", 1)[-1].lstrip()
     if (
@@ -238,6 +267,10 @@ def clean_completion(text: str, prefix: str, suffix: str) -> str:
         and "{\n" in text
     ):
         text = text.split("{\n", 1)[0] + "{"
+
+    # Ensure enum `case Name = 'val';` has trailing semicolon if not present in suffix
+    if current_line_stripped.startswith("case ") and "=" in current_line_stripped and text and not text.rstrip().endswith(";") and not suffix.lstrip(" \t").startswith(";"):
+        text = text.rstrip() + ";"
 
     # If refactoring to `function (...) use (` and the model mistakenly used `=> expr` instead of `{ return expr; }`
     if "function" in current_line_stripped and "use (" in current_line_stripped and ") => " in text and "{" not in text:
