@@ -4,10 +4,10 @@ Offline regression tests for the bridge's deterministic layers (no network, no G
 
 Every case is a REAL raw Gemini answer captured in /tmp/zed_fim_debug.log during live-coding
 emulation (simulate_mvc_live_coding.py) or real Zed sessions, together with the exact cursor
-context. They pin down the behaviour of:
-  * should_skip_request      - pre-flight Open Semantic Slot gatekeeper
-  * clean_completion         - structural post-processor
-  * mechanical_paren_closure - fallback when Gemini answers with nothing
+context. They pin down the behaviour of the PHP profile:
+  * PROFILE.should_skip  - pre-flight Open Semantic Slot gatekeeper
+  * postprocess()        - ordered post-processing rules (+ which rule fired)
+  * PROFILE.fallback     - mechanical paren closure when Gemini answers with nothing
 
 Usage (inside WSL):  python3 tests/test_postprocessor_offline.py
 """
@@ -15,7 +15,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import zed_fim_proxy as bridge  # noqa: E402
+from bridge.php import PROFILE  # noqa: E402
+from bridge.pipeline import postprocess  # noqa: E402
 
 # (title, prefix, suffix, raw Gemini answer, expected text sent to Zed)
 CLEAN_CASES = [
@@ -74,6 +75,23 @@ CLEAN_CASES = [
      "    public function getCreatedAt(", "\n    {", "): ?\\DateTimeImmutable", "): ?\\DateTimeImmutable"),
     ("`<` comparison inside code is not mistaken for a tag",
      "        for ($i = 1; $i ", "\n        }", "< $count; $i++) {", "< $count; $i++) {"),
+    ("Tab after match arm: `;')` debris is dropped",
+     "            self::Modulo => 'Остаток от деления'", "\n        };\n    }", ";');", ""),
+    ("Tab after match arm: `</i>;` debris is dropped",
+     "            self::Modulo => 'Остаток от деления'", "\n        };\n    }", "</i>;", ""),
+    ("try { skeleton: invented statement after the closed catch block is cut",
+     "    public function safeHistory(): string\n    {\n        try {", "\n    }\n",
+     "\n        } catch (\\Throwable $e) {\n            return '';\n        }\n        return $this->",
+     "\n        } catch (\\Throwable $e) {\n            return '';\n        }"),
+    ("try { skeleton with body: `} catch {` line keeps the block open",
+     "<?php\ntry {", "\n",
+     "\n    $db->exec($sql);\n} catch (\\Throwable $e) {\n    throw $e;\n}",
+     "\n    $db->exec($sql);\n} catch (\\Throwable $e) {\n    throw $e;\n}"),
+    ("Constructor promotion: invented second dependency is cut",
+     "    public function __construct(\n        private readonly LoggerInterface $logger,\n        private readonly ",
+     "\n    ) {}\n}",
+     "PaymentGatewayInterface $paymentGateway,\n        private readonly OrderRepositoryInterface $repository",
+     "PaymentGatewayInterface $paymentGateway,"),
     ("Tab after match arm: invented `Operation::Power` case is cut, trailing comma kept",
      "            Operation::Modulo => $a % $b",
      "\n        };", ",\n            Operation::Power => $a ** $b", ","),
@@ -130,30 +148,50 @@ FALLBACK_CASES = [
 ]
 
 
+# (title, prefix, suffix, raw Gemini answer, rule that must be reported in the debug log)
+RULE_TRACE_CASES = [
+    ("Invented fluent call is attributed to guard_fluent_chain",
+     "$d = (new B())->withOp(Operation::Divide", "\n    ->build();", ")->withPath('/x')", "guard_fluent_chain"),
+    ("Argument echo is attributed to reject_argument_echo",
+     "        $s = sprintf('%s %s', $a, $b, ", ", $c);", "$b", "reject_argument_echo"),
+    ("Inner call closed before same-line suffix is attributed to balance_parens",
+     "        $this->remember(sprintf('%s', $a, ", ", $result);", "$result", "balance_parens"),
+    ("Empty Gemini answer + continuation is attributed to the fallback",
+     "    $file = ltrim($relative", " . '.php';", "", "fallback:mechanical_paren_closure"),
+]
+
+
 def main() -> int:
     failed = 0
-    print("── clean_completion ──")
+    print("── postprocess (what Zed receives) ──")
     for title, prefix, suffix, raw, expected in CLEAN_CASES:
-        got = bridge.clean_completion(raw, prefix, suffix)
+        got, _ = postprocess(raw, prefix, suffix, PROFILE)
         ok = got == expected
         failed += not ok
         print(f"{'✅' if ok else '❌'} {title}" + ("" if ok else f"\n     expected {expected!r}\n     got      {got!r}"))
 
-    print("── should_skip_request ──")
+    print("── rule trace (debug log `rules`) ──")
+    for title, prefix, suffix, raw, rule in RULE_TRACE_CASES:
+        _, applied = postprocess(raw, prefix, suffix, PROFILE)
+        ok = rule in applied
+        failed += not ok
+        print(f"{'✅' if ok else '❌'} {title}" + ("" if ok else f" (got {applied})"))
+
+    print("── gatekeeper (PROFILE.should_skip) ──")
     for title, prefix, suffix, expected in SKIP_CASES:
-        got = bridge.should_skip_request(prefix, suffix)
+        got = PROFILE.should_skip(prefix, suffix)
         ok = got == expected
         failed += not ok
         print(f"{'✅' if ok else '❌'} {title}" + ("" if ok else f" (expected {expected}, got {got})"))
 
-    print("── mechanical_paren_closure ──")
+    print("── fallback (PROFILE.fallback) ──")
     for title, prefix, suffix, expected in FALLBACK_CASES:
-        got = bridge.mechanical_paren_closure(prefix, suffix)
+        got = PROFILE.fallback(prefix, suffix)
         ok = got == expected
         failed += not ok
         print(f"{'✅' if ok else '❌'} {title}" + ("" if ok else f" (expected {expected!r}, got {got!r})"))
 
-    total = len(CLEAN_CASES) + len(SKIP_CASES) + len(FALLBACK_CASES)
+    total = len(CLEAN_CASES) + len(RULE_TRACE_CASES) + len(SKIP_CASES) + len(FALLBACK_CASES)
     print(f"\n{total - failed}/{total} passed")
     return 1 if failed else 0
 
