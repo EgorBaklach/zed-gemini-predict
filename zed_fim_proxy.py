@@ -24,6 +24,7 @@ SYSTEM_INSTRUCTION = (
     "Insert ONLY the exact raw PHP code at <|fim_middle|> that seamlessly bridges <|fim_prefix|> and <|fim_suffix|>.\n"
     "Scope:\n"
     "- Syntactic & statement closure: finish started conditions, loops (foreach/for), function/method calls, fluent method chains, strings, brackets, and ALWAYS include the trailing semicolon (;) when completing a PHP statement at the end of a line.\n"
+    "- Call arguments: when the cursor follows `, ` inside a function/method CALL, supply the next argument the callee still expects (e.g. one argument per sprintf/printf placeholder) from variables already in scope; never repeat the argument written right before the cursor.\n"
     "- Structural skeleton closure: if <|fim_prefix|> ends with an unclosed block like `try {` (and `catch` is missing in <|fim_suffix|>), complete the minimal valid skeleton (e.g. `\\n} catch (\\Throwable $e) {\\n}`).\n"
     "- Idiomatic refactoring: transform local expressions between forms using ONLY existing local variables. In PHP, `function (...) use (...)` MUST use `{ return ...; }` (never `=>`), and `fn(...)` MUST use `=>`.\n"
     "- Mechanical continuation: complete repetitive array keys/items, enum cases (`case Name = 'value';`), constructor properties, or interface/trait signatures matching the immediate pattern.\n"
@@ -57,6 +58,40 @@ _OPEN_SEMANTIC_SLOT_RE = re.compile(
 )
 
 
+_PHP_STRING_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
+
+# Named declaration headers: classes/interfaces/traits/enums and named functions/methods (not closures)
+_DECLARATION_HEADER_RE = re.compile(
+    r"^(?:(?:public|protected|private|static|final|abstract|readonly)\s+)*"
+    r"(?:(?:class|interface|trait|enum)\s+\w+|function\s+\w+\s*\()"
+)
+
+
+def paren_depth(code: str) -> int:
+    """Net number of open `(` in a code fragment, ignoring parentheses inside PHP string literals."""
+    code = _PHP_STRING_RE.sub("''", code)
+    return code.count("(") - code.count(")")
+
+
+def mechanical_paren_closure(prefix: str, suffix: str) -> str:
+    """
+    Deterministic fallback when the LLM returned nothing: if an expression is finished right
+    before the cursor and the code after the cursor continues the same statement (same-line
+    suffix like ` . '.php';` or a fluent `->build();` on the next line), the only valid
+    minimal insertion is closing the still-open parentheses.
+    """
+    current_line = prefix.rsplit("\n", 1)[-1]
+    if not re.search(r"[\w\)\]'\"]$", current_line):
+        return ""
+    suffix_same_line = suffix.split("\n", 1)[0]
+    next_line = next((l.strip() for l in suffix.split("\n")[1:] if l.strip()), "")
+    continues_statement = bool(suffix_same_line.strip()) or next_line.startswith(("->", "?->"))
+    if not continues_statement:
+        return ""
+    missing = paren_depth(current_line) + min(0, paren_depth(suffix_same_line))
+    return ")" * missing if missing > 0 else ""
+
+
 def should_skip_request(prefix: str, suffix: str) -> bool:
     """
     Returns True if the cursor is at an Open Semantic Slot on the current line,
@@ -68,7 +103,11 @@ def should_skip_request(prefix: str, suffix: str) -> bool:
         return True
     current_stripped = current_line.strip()
     # Skip if the current line is already a completed statement ending with `;`
-    if current_stripped.endswith(";"):
+    # (but NOT inside an open header such as `for ($i = 0; $i < $n; ` where parens are still open)
+    if current_stripped.endswith(";") and paren_depth(current_stripped) <= 0:
+        return True
+    # Skip if the current line is a finished array item / match arm (`'key' => $value,`)
+    if current_stripped.endswith(",") and "=>" in current_stripped and paren_depth(current_stripped) <= 0:
         return True
     # Skip if the current line is already a completed block header ending with `{` (except `try {` when catch is missing)
     if current_stripped.endswith("{") and not current_stripped.startswith("try"):
@@ -168,7 +207,8 @@ def strip_prefix_repetition(text: str, prefix: str) -> str:
     current_line = prefix.rsplit("\n", 1)[-1].strip()
     if len(current_line) >= 6:
         text_stripped = text.strip(" ()")
-        if text_stripped == current_line or current_line.endswith(text_stripped):
+        # A pure closer like `)` / `))` is never a repetition (empty string would match any line end)
+        if text_stripped and (text_stripped == current_line or current_line.endswith(text_stripped)):
             return ""
     return text
 
@@ -191,16 +231,24 @@ def fix_paren_and_semicolon_balance(text: str, prefix: str, suffix: str) -> str:
     ):
         text = ") {"
 
-    open_parens = current_line_prefix.count("(") - current_line_prefix.count(")")
-    suffix_net_close = max(0, suffix_same_line.count(")") - suffix_same_line.count("("))
-    added_open = text.count("(")
-    added_close = text.count(")")
+    open_parens = paren_depth(current_line_prefix)
+    suffix_net_close = max(0, -paren_depth(suffix_same_line))
+    text_no_strings = _PHP_STRING_RE.sub("''", text)
+    added_open = text_no_strings.count("(")
+    added_close = text_no_strings.count(")")
     needed_close = max(0, open_parens + added_open - suffix_net_close)
 
     if suffix_same_line:
+        # The statement terminator already exists after the cursor (`, $this->results);`): never add another `;`
+        if suffix_same_line.rstrip().endswith((";", "{")) and text.rstrip().endswith(";"):
+            text = text.rstrip()[:-1]
         while added_close > needed_close and text.endswith(")"):
             text = text[:-1]
             added_close -= 1
+        # The same-line suffix continues an OUTER call (e.g. `sprintf(..., X` + `, $result);`):
+        # an inner call left open by the model must be closed, otherwise the line can never parse.
+        if added_close < needed_close and re.search(r"[\w\)\]'\"]$", text):
+            text += ")" * (needed_close - added_close)
     else:
         while added_close > needed_close and (text.endswith("))") or text.endswith("));")):
             if text.endswith("));"):
@@ -240,6 +288,12 @@ def clean_completion(text: str, prefix: str, suffix: str) -> str:
         elif len(lines) >= 2:
             text = "\n".join(lines[1:])
 
+    # Token debris: HTML-like tags outside string literals (`)</table>`) are never PHP code - cut them off
+    masked = _PHP_STRING_RE.sub(lambda s: " " * len(s.group()), text)
+    debris = re.search(r"</?[A-Za-z]", masked)
+    if debris:
+        text = text[: debris.start()].rstrip()
+
     if "\n\n" in text:
         first_part = text.split("\n\n", 1)[0]
         if first_part.strip():
@@ -260,6 +314,12 @@ def clean_completion(text: str, prefix: str, suffix: str) -> str:
     if prefix.endswith(("'", '"')) and len(text) >= 2 and text[0] == prefix[-1] and text[1].isalnum():
         text = text[1:]
 
+    # The fluent chain already continues on the next line (`->build();`): never extend it on this line
+    # with invented calls (`)->withPath(...)`) or dangling operator debris (`)>`), keep only the closure.
+    next_suffix_line = next((l.strip() for l in suffix.split("\n")[1:] if l.strip()), "")
+    if not suffix.split("\n", 1)[0].strip() and next_suffix_line.startswith(("->", "?->")) and "\n" not in text:
+        text = re.split(r"\??->", text, 1)[0].rstrip("->? ")
+
     # Never allow a condition/header line (`if (...)`) to also invent the body on the next line!
     current_line_stripped = prefix.rsplit("\n", 1)[-1].lstrip()
     if (
@@ -267,6 +327,65 @@ def clean_completion(text: str, prefix: str, suffix: str) -> str:
         and "{\n" in text
     ):
         text = text.split("{\n", 1)[0] + "{"
+
+    # Same for declaration headers (`final class X implements |`, `public function save(|`):
+    # complete the header only, never invent the class/method body.
+    if _DECLARATION_HEADER_RE.match(current_line_stripped) and "\n" in text:
+        head = text.split("\n", 1)[0]
+        text = head.split("{", 1)[0].rstrip() + " {" if "{" in head else head
+
+    # Inside a declaration's parameter list (`public function getHistory(|`) the rest of the header has a
+    # strict grammar: `[params]) [: ?Type] [;|{]`. Debris like `?): array;` or `)?: array;` is rejected.
+    if (
+        _DECLARATION_HEADER_RE.match(current_line_stripped)
+        and paren_depth(current_line_stripped) > 0
+        and text.strip()
+        and "\n" not in text.strip()
+    ):
+        tail = text.strip()
+        params, sep, rest = tail.partition(")")
+        params_ok = not params.strip() or "$" in params
+        rest_ok = re.fullmatch(r"\s*(:\s*\??[\\\w]+(\s*[|&]\s*\??[\\\w]+)*)?\s*[;{]?\s*", rest) is not None
+        if sep and not (params_ok and rest_ok):
+            text = ""
+
+    # A line that is already complete (match arm / array item) must not grow new lines:
+    # `,\n    Operation::Power => ...` invents a brand-new case. Keep only the line terminator.
+    m = re.match(r"^([,;])[ \t]*\n", text)
+    if m and current_line_stripped:
+        text = m.group(1)
+
+    # `;` is never valid after a match arm / array item (`default => 'x';`, `'key' => $v;`): those end
+    # with `,` or nothing. Detected structurally: the next line closes the literal or is another `=>` item.
+    next_code_line = next((l.strip() for l in suffix.split("\n")[1:] if l.strip()), "")
+    is_arm_line = (
+        "=>" in current_line_stripped
+        and not current_line_stripped.startswith(("return ", "$", "yield ", "foreach"))
+        and not suffix.split("\n", 1)[0].strip()
+        and (next_code_line.startswith(("}", "]")) or "=>" in next_code_line)
+    )
+    if is_arm_line and "\n" not in text.strip() and text.rstrip().endswith(";") and paren_depth(current_line_stripped + text) <= 0:
+        text = text.rstrip()[:-1].rstrip()
+
+    # Argument echo: `sprintf('...', $a, $b, |` -> `$b` repeats the previous argument. Silence beats wrong code.
+    prev_arg = re.search(r"([^,(]+),\s*$", current_line_stripped)
+    if prev_arg and text.strip():
+        core = text.strip().rstrip(";").rstrip(")").strip()
+        if core and core == prev_arg.group(1).strip():
+            text = ""
+
+    # Pure duplicate of what already follows the cursor (Tab before `));` -> model writes `));` again),
+    # including the next suffix line (Tab after the last match arm -> model writes `};` that is already below)
+    if text.strip() and "\n" not in text.strip():
+        if suffix.lstrip(" \t").startswith(text.strip()) or (
+            not suffix.split("\n", 1)[0].strip() and suffix.lstrip().startswith(text.strip())
+        ):
+            text = ""
+
+    # Body / closing part after a `{` header must start on a new line
+    # (`try {` + `            return ...` or `try {` + `} catch (...)` -> newline first)
+    if current_line_stripped.endswith("{") and "\n" in text and text[:1] in (" ", "\t", "}"):
+        text = "\n" + text
 
     # Ensure enum `case Name = 'val';` has trailing semicolon if not present in suffix
     if current_line_stripped.startswith("case ") and "=" in current_line_stripped and text and not text.rstrip().endswith(";") and not suffix.lstrip(" \t").startswith(";"):
@@ -383,6 +502,8 @@ class FimProxyHandler(BaseHTTPRequestHandler):
             raw_text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
 
         completion_text = clean_completion(raw_text, prefix, suffix)
+        if not completion_text:
+            completion_text = mechanical_paren_closure(prefix, suffix)
 
         usage_meta = resp_data.get("usageMetadata") or {}
         prompt_tokens = int(usage_meta.get("promptTokenCount") or 0)

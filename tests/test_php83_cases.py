@@ -39,10 +39,10 @@ for title, prefix, suffix in cases:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    t0 = time.time()
+    t0 = time.monotonic()
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    dt = int((time.time() - t0) * 1000)
+    dt = int((time.monotonic() - t0) * 1000)
     text = data["choices"][0]["text"]
     usage = data["usage"]
     print(f"[{dt:4d} ms | +{usage['completion_tokens']:2d} tok] {title}")

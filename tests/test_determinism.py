@@ -39,10 +39,10 @@ for label, prefix, suffix in open_slot_tests:
     prompt = f"<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>"
     body = json.dumps({"model": "gemini-3.5-flash-lite", "prompt": prompt, "max_tokens": 80}).encode("utf-8")
     req = urllib.request.Request("http://127.0.0.1:8089/v1/completions", data=body, headers={"Content-Type": "application/json"}, method="POST")
-    t0 = time.time()
+    t0 = time.monotonic()
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    dt = int((time.time() - t0) * 1000)
+    dt = int((time.monotonic() - t0) * 1000)
     text = data["choices"][0]["text"]
     status = "OK" if text == "" else "FAIL"
     print(f"[{status} | {dt:3d} ms] {label:46s} -> {text!r}")
@@ -52,10 +52,10 @@ for label, prefix, suffix in deterministic_tests:
     prompt = f"<|fim_prefix|>{prefix}<|fim_suffix|>{suffix}<|fim_middle|>"
     body = json.dumps({"model": "gemini-3.5-flash-lite", "prompt": prompt, "max_tokens": 80}).encode("utf-8")
     req = urllib.request.Request("http://127.0.0.1:8089/v1/completions", data=body, headers={"Content-Type": "application/json"}, method="POST")
-    t0 = time.time()
+    t0 = time.monotonic()
     with urllib.request.urlopen(req, timeout=15) as resp:
         data = json.loads(resp.read().decode("utf-8"))
-    dt = int((time.time() - t0) * 1000)
+    dt = int((time.monotonic() - t0) * 1000)
     text = data["choices"][0]["text"]
     status = "OK" if text != "" else "FAIL"
     print(f"[{status} | {dt:4d} ms] {label:46s} -> {text!r}")

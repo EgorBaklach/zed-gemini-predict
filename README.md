@@ -81,15 +81,28 @@ systemctl --user status zed-fim-proxy.service
 
 ## 🧪 Запуск тестов
 
-В репозитории содержатся 3 тестовых набора (46 сценариев):
-
 ```bash
-# 1. Тест закона детерминизма (16 открытых слотов за ~2 мс + 10 граничных кейсов PHP)
+# 0. Офлайн-тесты детерминированных слоёв (без сети и токенов): гейткипер, пост-процессор,
+#    механическое закрытие скобок — на реальных сырых ответах Gemini из логов
+python3 tests/test_postprocessor_offline.py
+
+# 1. Эмуляция живого написания ООП MVC-калькулятора в Zed (главный интеграционный тест):
+#    8 файлов (Enum, Interface, Trait, Model, Builder, View, Controller, index.php),
+#    26 проб «открытых слотов» + 24 точки Alt+\ + проверка после каждого Tab,
+#    сборка проекта из ответов моста -> php -l -> запуск -> 15 runtime-ассертов.
+#    Покрывает все кейсы из test_determinism / test_php_cases / test_php83_cases.
+python3 tests/simulate_mvc_live_coding.py              # одна сессия
+python3 tests/simulate_mvc_live_coding.py --runs 3     # проверка нестабильности модели
+python3 tests/simulate_mvc_live_coding.py --only model_sprintf,idx_fluent --runs 5  # точечный повтор шагов
+
+# 2. Тест закона детерминизма (16 открытых слотов за ~2 мс + 10 граничных кейсов PHP)
 python3 tests/test_determinism.py
 
-# 2. Базовые синтаксические конструкции и рефакторинг PHP (16 кейсов)
+# 3. Базовые синтаксические конструкции и рефакторинг PHP (16 кейсов)
 python3 tests/test_php_cases.py
 
-# 3. Конструкции современного PHP 8.2/8.3+ (Enums, Traits, Fluent Chains, Nullsafe)
+# 4. Конструкции современного PHP 8.2/8.3+ (Enums, Traits, Fluent Chains, Nullsafe)
 python3 tests/test_php83_cases.py
 ```
+
+> Эмулятору нужен `php` CLI (8.2+) в WSL. Сгенерированный из ответов моста проект остаётся в `/tmp/zed_mvc_calc`.
