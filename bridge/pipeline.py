@@ -1,7 +1,8 @@
 """
 Completion pipeline: language profile + ordered post-processing rules.
 
-    Zed request -> profile.should_skip (gatekeeper, 0 tokens)
+    Zed request -> profile.local_completion (deterministic answer, 0 tokens)  -> done if non-empty
+                -> profile.should_skip (gatekeeper, 0 tokens)               -> "" if True
                 -> Gemini
                 -> profile.rules, applied in order (each rule: (text, prefix, suffix) -> text)
                 -> profile.fallback if nothing is left
@@ -21,6 +22,7 @@ class LanguageProfile:
     should_skip: Callable[[str, str], bool]
     rules: tuple[Rule, ...]
     fallback: Callable[[str, str], str]
+    local_completion: Callable[[str, str], str] = lambda prefix, suffix: ""
 
 
 def postprocess(raw: str, prefix: str, suffix: str, profile: LanguageProfile) -> tuple[str, list[str]]:

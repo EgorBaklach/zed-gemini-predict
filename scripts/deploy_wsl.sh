@@ -9,6 +9,7 @@ if [ "$SRC" != "$DST" ]; then
   cp "$SRC/zed_fim_proxy.py" "$DST/"
   rm -rf "$DST/bridge" && cp -r "$SRC/bridge" "$DST/bridge"
   mkdir -p "$DST/tests" && cp "$SRC"/tests/*.py "$DST/tests/"
+  mkdir -p "$DST/scripts" && cp "$SRC"/scripts/* "$DST/scripts/"
   find "$DST/bridge" -name __pycache__ -prune -exec rm -rf {} +
 fi
 

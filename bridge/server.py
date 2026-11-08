@@ -34,21 +34,30 @@ def completion_response(model: str, text: str, prompt_tokens: int = 0, completio
     }
 
 
-def write_debug_log(prefix: str, suffix: str, reply: GeminiReply, text: str, rules: list[str]) -> None:
-    """One JSON line per Gemini call: what the model said, what Zed got, and which rules made the difference."""
+def write_debug_log(prefix: str, suffix: str, decision: str, text: str = "", rules: list[str] | None = None,
+                    reply: GeminiReply | None = None) -> None:
+    """
+    One JSON line per request. `decision`: `local` (deterministic answer), `skip` (gatekeeper, silent)
+    or `llm` (Gemini answer + which rules changed it).
+    """
+    entry = {
+        "ts": int(time.time()),
+        "decision": decision,
+        "prefix_tail": prefix[-160:],
+        "suffix_head": suffix[:160],
+        "cleaned_text": text,
+        "rules": rules or [],
+    }
+    if reply is not None:
+        entry.update({
+            "latency_ms": reply.latency_ms,
+            "tokens": f"{reply.prompt_tokens}+{reply.completion_tokens}",
+            "finish_reason": reply.finish_reason,
+            "raw_text": reply.text,
+        })
     try:
         with open(config.DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": int(time.time()),
-                "latency_ms": reply.latency_ms,
-                "tokens": f"{reply.prompt_tokens}+{reply.completion_tokens}",
-                "finish_reason": reply.finish_reason,
-                "prefix_tail": prefix[-160:],
-                "suffix_head": suffix[:160],
-                "raw_text": reply.text,
-                "cleaned_text": text,
-                "rules": rules,
-            }, ensure_ascii=False) + "\n")
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
@@ -74,8 +83,18 @@ class FimProxyHandler(BaseHTTPRequestHandler):
         max_tokens = int(payload.get("max_tokens") or config.DEFAULT_MAX_TOKENS)
         prefix, suffix = parse_fim_prompt(payload.get("prompt", ""))
 
+        # Deterministic local completion (e.g. closing a block the developer opened): 0 tokens, ~1 ms
+        local = PROFILE.local_completion(prefix, suffix)
+        if local:
+            name = f"local:{PROFILE.local_completion.__name__}"
+            write_debug_log(prefix, suffix, "local", local, [name])
+            log(f"LOCAL {name} -> {local!r}")
+            self._send_json(200, completion_response(req_model, local))
+            return
+
         # Pre-flight Open Semantic Slot guard (0 ms, 0 tokens, zero architectural invention)
         if PROFILE.should_skip(prefix, suffix):
+            write_debug_log(prefix, suffix, "skip")
             self._send_json(200, completion_response(req_model, ""))
             return
 
@@ -92,7 +111,7 @@ class FimProxyHandler(BaseHTTPRequestHandler):
             return
 
         text, rules = postprocess(reply.text, prefix, suffix, PROFILE)
-        write_debug_log(prefix, suffix, reply, text, rules)
+        write_debug_log(prefix, suffix, "llm", text, rules, reply)
         log(
             f"OK model={gemini_model} latency={reply.latency_ms}ms "
             f"tokens={reply.prompt_tokens}+{reply.completion_tokens} finish={reply.finish_reason} "

@@ -100,12 +100,51 @@ def keep_line_terminator_only(text: str, prefix: str, suffix: str) -> str:
     return text
 
 
+_STRING_LITERAL_RE = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
+
+
+def _open_call_arguments(line: str) -> list[str]:
+    """Top-level arguments already written inside the innermost still-open `(` of the line (strings masked)."""
+    line = _STRING_LITERAL_RE.sub("''", line)
+    depth, start = 0, None
+    for i in range(len(line) - 1, -1, -1):
+        ch = line[i]
+        if ch == ")":
+            depth += 1
+        elif ch == "(":
+            if depth == 0:
+                start = i + 1
+                break
+            depth -= 1
+    if start is None:
+        return []
+    args, level, current = [], 0, ""
+    for ch in line[start:]:
+        if ch in "([{":
+            level += 1
+        elif ch in ")]}":
+            level -= 1
+        if ch == "," and level == 0:
+            args.append(current.strip())
+            current = ""
+        else:
+            current += ch
+    return [a for a in args if a]
+
+
 def reject_argument_echo(text: str, prefix: str, suffix: str) -> str:
-    """`f($a, $b, |` -> `$b` repeats the previous argument. Silence beats wrong code."""
-    prev_arg = re.search(r"([^,(]+),\s*$", current_line(prefix).lstrip())
-    if prev_arg and text.strip():
-        core = text.strip().rstrip(";").rstrip(")").strip()
-        if core and core == prev_arg.group(1).strip():
+    """
+    `f($a, $op->value, $b, |` -> `$b` / `$op` repeats a value already passed to this call
+    (or the base of one: `$op` of `$op->value`). Silence beats wrong code.
+    """
+    line = current_line(prefix).lstrip()
+    if not re.search(r",\s*$", line) or not text.strip():
+        return text
+    core = text.strip().rstrip(";").rstrip(")").strip()
+    if not core:
+        return text
+    for arg in _open_call_arguments(line):
+        if core == arg or arg.startswith((core + "->", core + "?->", core + "[")):
             return ""
     return text
 

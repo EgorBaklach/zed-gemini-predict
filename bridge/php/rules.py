@@ -29,11 +29,18 @@ def strip_php_tags(text: str, prefix: str, suffix: str) -> str:
 
 
 def cut_token_debris(text: str, prefix: str, suffix: str) -> str:
-    """HTML-like tags outside string literals (`)</table>`) are never PHP code - cut them off."""
+    """
+    Token debris outside string literals: HTML-like tags (`)</table>`) and a dangling opening bracket
+    right after a finished string or statement (`'/'[`, `$x;(`) are never intended PHP code - cut them off.
+    """
     masked = PHP_STRING_RE.sub(lambda s: " " * len(s.group()), text)
     debris = re.search(r"</?[A-Za-z]", masked)
     if debris:
         return text[: debris.start()].rstrip()
+    if "\n" not in text.strip():
+        dangling = re.search(r"(?<=['\";])\s*[\[\(\{]\s*;?\s*$", text)
+        if dangling and masked[dangling.start():].strip():  # the opener itself is not inside a string
+            return text[: dangling.start()]
     return text
 
 

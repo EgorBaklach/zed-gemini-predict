@@ -87,6 +87,15 @@ CLEAN_CASES = [
      "<?php\ntry {", "\n",
      "\n    $db->exec($sql);\n} catch (\\Throwable $e) {\n    throw $e;\n}",
      "\n    $db->exec($sql);\n} catch (\\Throwable $e) {\n    throw $e;\n}"),
+    ("Argument echo: base of an earlier argument (`$op` of `$op->value`) is rejected",
+     "        $this->remember(sprintf('%s %s %s = %s', $a, $op->value, $b, ",
+     ", $result);\n\n        return $result;", "$op", ""),
+    ("Argument echo check ignores commas/parens inside the format string",
+     "        $msg = sprintf('a, (b), %s, %s', $name, ", ");", "$ip", "$ip"),
+    ("Dangling `[` after a finished string literal is debris (`'/'[`)",
+     "    case Divide = ", "\n    case Modulo = '%';", "'/'[", "'/';"),
+    ("A `[` inside a string literal is kept",
+     "        $s = ", "\n", "'a['", "'a['"),
     ("Constructor promotion: invented second dependency is cut",
      "    public function __construct(\n        private readonly LoggerInterface $logger,\n        private readonly ",
      "\n    ) {}\n}",
@@ -161,8 +170,47 @@ RULE_TRACE_CASES = [
 ]
 
 
+# (title, prefix, suffix, expected local completion) - deterministic answers without Gemini
+_METHOD = "    public function check(): string\n    {\n"
+LOCAL_CASES = [
+    ("Allman block, body done, next statement back at `{` level -> close with `}` on a new line",
+     _METHOD + "        if(!$this->dispatcher->dispatch())\n        {\n            return json_encode(['status' => 'error']);",
+     "\n\n        return json_encode(['status' => 'ok']);\n    }\n}\n",
+     "\n        }"),
+    ("K&R `if (...) {` block, last statement of the method -> close before the method's `}`",
+     _METHOD + "        if ($x) {\n            return 1;", "\n    }\n}\n", "\n        }"),
+    ("Blank line already at the `{` indentation -> `}`",
+     _METHOD + "        if ($x)\n        {\n            return 1;\n        ", "\n        return 2;\n    }\n", "}"),
+    ("Blank line still at body indentation -> silent (insertion cannot dedent)",
+     _METHOD + "        if ($x)\n        {\n            return 1;\n            ", "\n        return 2;\n    }\n", ""),
+    ("Block already closed below -> silent",
+     _METHOD + "        if ($x)\n        {\n            return 1;", "\n        }\n        return 2;\n    }\n", ""),
+    ("`} else {` below closes the block -> silent",
+     _METHOD + "        if ($x) {\n            $a = 1;", "\n        } else {\n            $a = 2;\n        }\n", ""),
+    ("Body continues below (deeper indent) -> silent",
+     _METHOD + "        if ($x)\n        {\n            $a = 1;", "\n            $b = 2;\n        }\n", ""),
+    ("Empty block (no body yet) -> silent (open slot)",
+     _METHOD + "        if ($x)\n        {", "\n        return 2;\n    }\n", ""),
+    ("Cursor before the body (after Tab) -> silent (FIM inserts only at the cursor)",
+     _METHOD + "        if ($x)\n        {\n            ", "return 1;\n        return 2;\n    }\n", ""),
+    ("Unfinished statement on the cursor line -> silent",
+     _METHOD + "        if ($x)\n        {\n            $a = foo(", "\n        return 2;\n    }\n", ""),
+    ("Normal statement inside a well-formed method -> silent",
+     _METHOD + "        $a = 1;", "\n        $b = 2;\n    }\n", ""),
+    ("Braces inside strings are ignored",
+     _METHOD + "        if ($x)\n        {\n            $s = '{ not a block';", "\n        return $s;\n    }\n", "\n        }"),
+]
+
+
 def main() -> int:
     failed = 0
+    print("── local completion (PROFILE.local_completion) ──")
+    for title, prefix, suffix, expected in LOCAL_CASES:
+        got = PROFILE.local_completion(prefix, suffix)
+        ok = got == expected
+        failed += not ok
+        print(f"{'✅' if ok else '❌'} {title}" + ("" if ok else f" (expected {expected!r}, got {got!r})"))
+
     print("── postprocess (what Zed receives) ──")
     for title, prefix, suffix, raw, expected in CLEAN_CASES:
         got, _ = postprocess(raw, prefix, suffix, PROFILE)
@@ -191,7 +239,7 @@ def main() -> int:
         failed += not ok
         print(f"{'✅' if ok else '❌'} {title}" + ("" if ok else f" (expected {expected!r}, got {got!r})"))
 
-    total = len(CLEAN_CASES) + len(RULE_TRACE_CASES) + len(SKIP_CASES) + len(FALLBACK_CASES)
+    total = len(LOCAL_CASES) + len(CLEAN_CASES) + len(RULE_TRACE_CASES) + len(SKIP_CASES) + len(FALLBACK_CASES)
     print(f"\n{total - failed}/{total} passed")
     return 1 if failed else 0
 

@@ -55,7 +55,7 @@ Practical pitfalls learned the hard way:
 | GitHub | https://github.com/EgorBaklach/zed-gemini-predict (branch `main`) |
 | systemd user unit | WSL `~/.config/systemd/user/zed-fim-proxy.service` (= repo `systemd/zed-fim-proxy.service`) |
 | Secrets | WSL `~/.zed_fim_proxy.env` (`chmod 600`): `GEMINI_API_KEY`, `GEMINI_MODEL`. **Never print, log or commit the key.** |
-| Debug log (JSONL, one line per Gemini call) | WSL `/tmp/zed_fim_debug.log` (wiped on WSL restart) |
+| Debug log (JSONL, one line per request: `decision` = `local` / `skip` / `llm`) | WSL `/tmp/zed_fim_debug.log` (wiped on WSL restart); view with `scripts/debug_log.py` |
 | Service log | `journalctl --user -u zed-fim-proxy.service` |
 | Emulator output project | WSL `/tmp/zed_mvc_calc` |
 | Zed config | `C:\Users\egorb\AppData\Roaming\Zed\settings.json` → `edit_predictions.open_ai_compatible_api` (`api_url`, `model`, `prompt_format: "qwen"`, `max_output_tokens: 80`, `prediction_debounce: 400`). `show_edit_predictions` is the user's choice — don't change it without asking. |
@@ -74,11 +74,12 @@ wsl bash -lc 'cd ~/zed-gemini-predict && git fetch -q origin && git reset -q --h
 ```
 Zed ──POST /v1/completions──> bridge/server.py
                                  │ parse FIM (fim.py), resolve API key/model
+                                 ├─ PROFILE.local_completion(prefix, suffix) → deterministic answer, 0 tokens [php/local.py]
                                  ├─ PROFILE.should_skip(prefix, suffix)  → "" in ~2 ms, 0 tokens   [php/gatekeeper.py]
                                  ├─ GeminiClient.generate(...)           → raw text (~600 ms)      [gemini.py]
                                  ├─ postprocess(raw, prefix, suffix)     → ordered rules + trace   [pipeline.py]
                                  │     └─ if empty: PROFILE.fallback     → mechanical ")" closure  [php/fallback.py]
-                                 └─ debug log line {raw_text, cleaned_text, rules:[...]} + JSON response
+                                 └─ debug log line {decision: local|skip|llm, raw_text, cleaned_text, rules} + JSON response
 ```
 
 | File | Responsibility |
@@ -97,6 +98,7 @@ Zed ──POST /v1/completions──> bridge/server.py
 | `bridge/php/rules.py` | PHP rules (guards, idioms, `balance_parens`) |
 | `bridge/php/syntax.py` | String-aware helpers: `paren_depth`, `without_strings`, header regexes |
 | `bridge/php/fallback.py` | `mechanical_paren_closure` |
+| `bridge/php/local.py` | `close_open_block`: deterministic `}` for a block whose body is written but closer is missing (braces + indentation) |
 
 Rule contract: `rule(text, prefix, suffix) -> str`, pure, must keep `""` as `""`, named after what it does
 (the name appears in the debug log). New language = new package `bridge/<lang>/` with its own profile reusing
@@ -110,6 +112,11 @@ Performance is a non-issue: local processing ≈ 30 µs per request, RSS ≈ 11 
 
 When the bridge misbehaves, choose the layer in this order of preference:
 
+0. **Local completion** (`php/local.py`) — the correct answer is fully determined by structure alone
+   (e.g. a block with a written body and a missing `}` while the next code is back at the `{` level).
+   Answer without Gemini: 0 tokens, ~1 ms, deterministic. It runs BEFORE the gatekeeper (it applies exactly
+   where the gatekeeper is silent), so it must be strict: verify it never fires on well-formed code
+   (run it over every context in the debug log and the emulator — zero false positives expected).
 1. **Gatekeeper** (`php/gatekeeper.py`) — the cursor position itself means "no suggestion possible"
    (Open Semantic Slot, line already complete with `;` / `{` / `'k' => $v,`, cursor inside an identifier).
    Cheapest: no tokens, no latency, no nondeterminism.
@@ -155,13 +162,13 @@ context × raw answer combination from the debug log and the emulator) before ru
 | Test | Needs | Cost | What it proves |
 |---|---|---|---|
 | `tests/test_postprocessor_offline.py` | nothing | 0 tokens, <1 s | gatekeeper, every rule, rule trace, fallback on **real captured raw answers** |
-| `tests/simulate_mvc_live_coding.py` | running bridge + `php` | ~30k tokens/session, ~40 s | **main integration test**: types an 8-file OOP MVC calculator (Enum, Interface, Trait, Model, fluent Builder, View, Controller, index.php) "inside Zed": 26 probes must be silent, 24 Alt+\ slots validated by regex/paren balance/duplicate checks, a Tab re-request after every accepted answer, then `php -l` on all files and 15 runtime assertions. Covers all cases D1–D26, P1–P16, P83-17..20 + real Zed traps ZED-1..6 |
+| `tests/simulate_mvc_live_coding.py` | running bridge + `php` | ~30k tokens/session, ~40 s | **main integration test**: types an 8-file OOP MVC calculator (Enum, Interface, Trait, Model, fluent Builder, View, Controller, index.php) "inside Zed": 27 probes must be silent, 25 Alt+\ slots validated by regex/paren balance/duplicate checks, a Tab re-request after every accepted answer, then `php -l` on all files and 16 runtime assertions. Covers all cases D1–D26, P1–P16, P83-17..20 + real Zed traps ZED-1..8 |
 | `tests/test_determinism.py` | running bridge | small | 16 open slots must return `''`, 10 deterministic cases must return code |
 | `tests/test_php_cases.py`, `tests/test_php83_cases.py` | running bridge | small | print answers for eyeball review (no assertions) |
 
 **Gemini is nondeterministic even at `temperature 0`.** A single green run proves little — use `--runs 3`.
-Healthy baseline (after commit `fcd28ea`): every run `php -l` OK + 15/15 runtime, 26/26 probes silent,
-22–24/24 slots, post-Tab silent ~23/23. Known non-blocking misses are listed in §9.
+Healthy baseline: every run `php -l` OK + 16/16 runtime, 27/27 probes silent,
+23–25/25 slots, post-Tab silent ~24/24. Known non-blocking misses are listed in §9.
 
 Emulator template syntax: `⟦name⟧` = completion slot (`SLOTS`: `golden`, `expect` regex, optional `apply=False`),
 `⟦?name⟧` = probe (`PROBES`: `typed`, optional `after` = text auto-inserted by Zed after the cursor).
@@ -176,6 +183,9 @@ Everything above the cursor contains the bridge's real accepted answers; below t
   Hence the gatekeeper's "line already complete" checks and the emulator's post-Tab check.
 - Zed auto-closes brackets/quotes: a probe like `$payload = [` arrives with suffix `];`, `'` with suffix `'`.
 - `prompt_format: "qwen"` → `<|fim_prefix|>`/`<|fim_suffix|>`/`<|fim_middle|>`; Zed sends ~500–1000 tokens of context.
+- **FIM answers are inserted AT THE CURSOR only** (no edits elsewhere; that would need Zed's `zeta` formats).
+  Example: after moving a one-line `if` body under a new `{` and pressing Tab, the cursor is *before* the body —
+  a `}` after the body cannot be offered there. At the end of the body line (End) `close_open_block` offers `\n    }`.
 
 Historical decisions (don't regress): `gemini-2.5-flash-lite` is retired for new keys (404) → `gemini-3.5-flash-lite`;
 `thinkingBudget: 0` → 400 on 3.5, use `thinkingLevel: "MINIMAL"`; `<|fim_middle|>` must NOT be a stop sequence

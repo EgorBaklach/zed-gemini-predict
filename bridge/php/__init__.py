@@ -10,6 +10,7 @@ from ..pipeline import LanguageProfile
 from . import rules as php
 from .fallback import mechanical_paren_closure
 from .gatekeeper import should_skip_request
+from .local import close_open_block
 from .prompt import SYSTEM_INSTRUCTION
 
 RULES = (
@@ -51,4 +52,5 @@ PROFILE = LanguageProfile(
     should_skip=should_skip_request,
     rules=RULES,
     fallback=mechanical_paren_closure,
+    local_completion=close_open_block,
 )

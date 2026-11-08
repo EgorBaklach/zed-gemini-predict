@@ -190,6 +190,10 @@ SLOTS = {
         title="Classic for counter `for ($i = 1; $i <= $count; |`",
         covers=["P11"], golden="$i++) {", expect=r"(\$i\+\+|\+\+\$i)\)\s*\{",
     ),
+    "ctrl_close_block": dict(
+        title="One-line if turned into a block: body done -> close `}` on the next line (local, 0 tokens)",
+        covers=["ZED-8"], golden="\n        }", expect=r"\}",
+    ),
     # index.php
     "idx_concat": dict(
         title="Concatenation `rtrim(...) . '/src/' . ltrim($relative|` before ` . '.php';`",
@@ -232,6 +236,7 @@ PROBES = {
     "p_partial_kw": dict(title="Half-typed keyword `fo`", covers=["ZED-6"], typed="fo"),
     "p_foreach": dict(title="Bare `foreach (`", covers=["D6"], typed="foreach (", after=")"),
     "p_new": dict(title="`$model = new ` without class", covers=["D11"], typed="$model = new "),
+    "p_body_start": dict(title="Cursor before the moved body after Tab (`|return ...;`)", covers=["ZED-7"], typed=""),
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -528,6 +533,15 @@ final class CalculatorController
 
         return implode(PHP_EOL, $rows);
     }
+
+    public function check(bool $ok): string
+    {
+        if (!$ok)
+        {
+            ⟦?p_body_start⟧return $this->view->renderJson(false, null, 'Not confirmed', 409);⟦ctrl_close_block⟧
+
+        return $this->view->renderJson(true, 1.0);
+    }
 }
 """),
     ("index.php", "Front", r"""<?php
@@ -570,6 +584,8 @@ $report = [
     'rounded' => $model->roundedResults(1),
     'positive' => $model->positiveResults(),
     'fallback' => Operation::fallback()->value,
+    'check_fail' => json_decode($controller->check(false), true),
+    'check_ok' => json_decode($controller->check(true), true),
 ];
 
 echo json_encode($report, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR), PHP_EOL;
@@ -683,6 +699,9 @@ def runtime_checks(r: dict) -> list[tuple[str, bool]]:
         ("roundedResults(1) == [15, 5, 1]", chk(lambda: r["rounded"] == [15, 5, 1])),
         ("positiveResults() == [15, 5, 1]", chk(lambda: r["positive"] == [15, 5, 1])),
         ("Operation::fallback() == '+'", chk(lambda: r["fallback"] == "+")),
+        ("check(false) -> 409 from the closed block, check(true) -> success",
+         chk(lambda: r["check_fail"]["code"] == 409 and r["check_fail"]["success"] is False
+             and r["check_ok"]["success"] is True)),
     ]
 
 
@@ -742,7 +761,7 @@ def run_once(verbose: bool, only: set | None = None) -> dict:
             ok = not problems
             mark = "✅" if ok else "❌"
             print(f"{mark} {n:02d} SLOT  [{','.join(spec['covers'])}] {spec['title']}")
-            print(f"       -> LLM {ans.ms} ms (+{ans.completion_tokens} tok): {short(text, 90)}")
+            print(f"       -> {'🔒 local' if ans.local else 'LLM'} {ans.ms} ms (+{ans.completion_tokens} tok): {short(text, 90)}")
             if problems:
                 print(f"       !! {'; '.join(problems)}")
             if tab is not None:
