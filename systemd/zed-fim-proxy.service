@@ -1,0 +1,14 @@
+[Unit]
+Description=Zed Edit Predictions FIM-to-Gemini 3.5 Flash Lite Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.zed_fim_proxy.env
+ExecStart=/usr/bin/python3 %h/zed-gemini-predict/zed_fim_proxy.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

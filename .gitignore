@@ -1,0 +1,6 @@
+.env
+.zed_fim_proxy.env
+__pycache__/
+*.py[cod]
+*.log
+/tmp/
