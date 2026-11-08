@@ -129,3 +129,13 @@ python3 tests/test_php83_cases.py
 ```
 
 > Эмулятору нужен `php` CLI (8.2+) в WSL. Сгенерированный из ответов моста проект остаётся в `/tmp/zed_mvc_calc`.
+
+## 🛠️ Скрипты разработки (WSL)
+
+```bash
+bash scripts/deploy_wsl.sh        # рабочая копия -> runtime-клон ~/zed-gemini-predict + рестарт сервиса
+bash scripts/regression.sh [N]    # офлайн-тесты + эмулятор xN (по умолчанию 3) + старые наборы
+python3 scripts/debug_log.py 30 sprintf   # последние решения моста: сырой ответ, что ушло в Zed, сработавшие правила
+```
+
+Правила работы с репозиторием для AI-агентов — в [AGENTS.md](AGENTS.md).
