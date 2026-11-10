@@ -1,12 +1,11 @@
 [Unit]
-Description=Zed Edit Predictions FIM-to-Gemini 3.5 Flash Lite Proxy
+Description=Zed Edit Predictions Local PHP Syntax Engine
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.zed_fim_proxy.env
-ExecStart=/usr/bin/python3 %h/zed-gemini-predict/zed_fim_proxy.py
+ExecStart=/usr/bin/php -S 127.0.0.1:8089 -t %h/zed-gemini-predict/public %h/zed-gemini-predict/public/index.php
 Restart=always
 RestartSec=2
 
