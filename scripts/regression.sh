@@ -10,3 +10,14 @@ find public src tests -name "*.php" -print0 | xargs -0 -n1 php -l
 echo ""
 echo "=== 2. PHP Bridge Unit Tests ==="
 php tests/run.php
+
+echo ""
+echo "=== 3. Live HTTP Endpoint Check (127.0.0.1:8089) ==="
+curl -s http://127.0.0.1:8089/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"<|fim_prefix|><?php\n\n<|fim_suffix|>\n<|fim_middle|>"}'
+echo ""
+curl -s http://127.0.0.1:8089/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"<|fim_prefix|><?php\n$a = 1;\n<|fim_suffix|>\n<|fim_middle|>"}'
+echo ""
